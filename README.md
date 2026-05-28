@@ -1,5 +1,7 @@
 # ZT-Slop
 
+![Supply chain attack meme](docs/supply-chain-attack-meme.png)
+
 A tiny, deterministic GitHub PR check for supply-chain risk.
 
 ZT-Slop scans what a pull request introduces: dependency changes, lockfile changes, GitHub Actions workflow changes, possible leaked secrets, and obvious secret-exfiltration paths. It is intentionally boring: it does **not** install dependencies, import project code, run tests, execute build scripts, or ask an LLM whether a PR is safe.
