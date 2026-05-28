@@ -1,0 +1,16 @@
+{
+  "allowed_registry_domains": [
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "pypi.org",
+    "files.pythonhosted.org"
+  ],
+  "osv": {
+    "enabled": true,
+    "warn_on_vulnerabilities": true,
+    "timeout_seconds": 12
+  },
+  "workflow": {
+    "warn_on_unpinned_actions": true
+  }
+}

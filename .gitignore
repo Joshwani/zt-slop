@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+zt-slop-report.json
+zt-slop-report.md
+zt-slop-report.sarif
+.DS_Store

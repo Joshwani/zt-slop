@@ -1,0 +1,107 @@
+name: ZT-Slop PR Guard
+description: Deterministic PR check for supply-chain threats in dependency, lockfile, workflow, and secret-related changes.
+author: your-org
+
+inputs:
+  base-ref:
+    description: Base git ref or SHA. Defaults to the pull request base SHA, then HEAD~1.
+    required: false
+    default: ''
+  head-ref:
+    description: Head git ref or SHA. Defaults to github.sha, then HEAD.
+    required: false
+    default: ''
+  config:
+    description: Optional JSON config path.
+    required: false
+    default: zt-slop.json
+  fail-on:
+    description: Exit non-zero on block, warn, or none.
+    required: false
+    default: block
+  no-network:
+    description: Disable OSV network lookups.
+    required: false
+    default: 'false'
+  json-report:
+    description: JSON report path.
+    required: false
+    default: zt-slop-report.json
+  markdown-report:
+    description: Markdown report path.
+    required: false
+    default: zt-slop-report.md
+  sarif-report:
+    description: SARIF report path.
+    required: false
+    default: zt-slop-report.sarif
+
+outputs:
+  report-json:
+    description: Path to the JSON report.
+    value: ${{ steps.scan.outputs.report-json }}
+  report-markdown:
+    description: Path to the Markdown report.
+    value: ${{ steps.scan.outputs.report-markdown }}
+  report-sarif:
+    description: Path to the SARIF report.
+    value: ${{ steps.scan.outputs.report-sarif }}
+
+runs:
+  using: composite
+  steps:
+    - id: scan
+      shell: bash
+      run: |
+        set +e
+
+        BASE="${{ inputs.base-ref }}"
+        HEAD="${{ inputs.head-ref }}"
+
+        if [ -z "$BASE" ]; then
+          BASE="${{ github.event.pull_request.base.sha }}"
+        fi
+        if [ -z "$BASE" ]; then
+          BASE="HEAD~1"
+        fi
+
+        if [ -z "$HEAD" ]; then
+          HEAD="${{ github.sha }}"
+        fi
+        if [ -z "$HEAD" ]; then
+          HEAD="HEAD"
+        fi
+
+        JSON_REPORT="${{ inputs.json-report }}"
+        MARKDOWN_REPORT="${{ inputs.markdown-report }}"
+        SARIF_REPORT="${{ inputs.sarif-report }}"
+
+        EXTRA_ARGS=()
+        if [ "${{ inputs.no-network }}" = "true" ]; then
+          EXTRA_ARGS+=(--no-network)
+        fi
+
+        python3 "$GITHUB_ACTION_PATH/zt_slop.py" \
+          --base "$BASE" \
+          --head "$HEAD" \
+          --config "${{ inputs.config }}" \
+          --fail-on "${{ inputs.fail-on }}" \
+          --json-report "$JSON_REPORT" \
+          --markdown-report "$MARKDOWN_REPORT" \
+          --sarif-report "$SARIF_REPORT" \
+          "${EXTRA_ARGS[@]}"
+        STATUS=$?
+
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "$MARKDOWN_REPORT" ]; then
+          cat "$MARKDOWN_REPORT" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        echo "report-json=$JSON_REPORT" >> "$GITHUB_OUTPUT"
+        echo "report-markdown=$MARKDOWN_REPORT" >> "$GITHUB_OUTPUT"
+        echo "report-sarif=$SARIF_REPORT" >> "$GITHUB_OUTPUT"
+
+        exit "$STATUS"
+
+branding:
+  icon: shield
+  color: red
