@@ -1040,7 +1040,7 @@ def write_sarif_report(path: str, findings: Sequence[Finding]) -> None:
                     "driver": {
                         "name": "ZT-Slop",
                         "version": VERSION,
-                        "informationUri": "https://github.com/your-org/zt-slop",
+                        "informationUri": "https://github.com/Joshwani/zt-slop",
                         "rules": list(rules.values()),
                     }
                 },

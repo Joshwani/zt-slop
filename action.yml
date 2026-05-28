@@ -1,6 +1,6 @@
 name: ZT-Slop PR Guard
 description: Deterministic PR check for supply-chain threats in dependency, lockfile, workflow, and secret-related changes.
-author: your-org
+author: Joshwani
 
 inputs:
   base-ref:

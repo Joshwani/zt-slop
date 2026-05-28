@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: your-org/zt-slop@v0
+      - uses: Joshwani/zt-slop@v0
         with:
           fail-on: block
 ```
@@ -103,7 +103,7 @@ Optional `zt-slop.json`:
 Disable network access if you only want static diff checks:
 
 ```yaml
-- uses: your-org/zt-slop@v0
+- uses: Joshwani/zt-slop@v0
   with:
     no-network: 'true'
 ```
@@ -111,7 +111,7 @@ Disable network access if you only want static diff checks:
 ## Optional SARIF upload
 
 ```yaml
-      - uses: your-org/zt-slop@v0
+      - uses: Joshwani/zt-slop@v0
         id: zt-slop
         with:
           fail-on: none
