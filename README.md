@@ -54,6 +54,7 @@ ZT-Slop starts small and high-signal. The default `block` rules are:
 | Secret exfil path | Changed file reads secrets/env and sends data to the network |
 | Install-time execution | `package.json` adds/changes `preinstall`, `install`, `postinstall`, or `prepare` |
 | Obvious secret leak | PR adds a private key, GitHub token, AWS access key, Slack token, or npm token pattern |
+| CI mutable tool install | A CI/release job adds a third-party package repo, downloads a signing key/bootstrap script, installs a high-impact security/release tool without an exact version, uses a floating tool container image, or uses an unpinned high-impact GitHub Action |
 
 It also emits warnings for unpinned GitHub Actions, newly added publishing commands, floating dependency specs like `latest`, removed lockfile integrity metadata, and known non-malicious OSV vulnerability matches.
 
@@ -83,6 +84,7 @@ Optional `zt-slop.json`:
 
 ```json
 {
+  "exclude_paths": [],
   "allowed_registry_domains": [
     "registry.npmjs.org",
     "registry.yarnpkg.com",
@@ -96,9 +98,36 @@ Optional `zt-slop.json`:
   },
   "workflow": {
     "warn_on_unpinned_actions": true
+  },
+  "ci_supply_chain": {
+    "enabled": true,
+    "block_third_party_package_repos": true,
+    "block_downloaded_package_keys": true,
+    "block_unpinned_high_impact_tools": true,
+    "block_floating_tool_images": true,
+    "block_high_impact_actions_not_sha_pinned": true,
+    "additional_ci_paths": [],
+    "allowed_package_repo_domains": [],
+    "allowed_bootstrap_domains": []
   }
 }
 ```
+
+The `ci_supply_chain` section guards CI/CD and release automation files (GitHub
+Actions, CircleCI, GitLab CI, Jenkins, Azure/Bitbucket/Buildkite pipelines,
+`Makefile`/`Taskfile`, and release/publish scripts). It blocks PRs that add
+mutable third-party package repos, downloaded signing keys or bootstrap
+installers, unpinned high-impact tool installs, floating tool container images,
+or unpinned high-impact GitHub Actions. See [docs/rules.md](docs/rules.md) for
+the full list, the publish-context escalation, and domain allowlisting. The
+section is optional and backward compatible; omit it to use the built-in
+defaults.
+
+`exclude_paths` accepts globs (e.g. `vendor/*.js`) and directory prefixes ending
+in `/` (e.g. `tests/`). Listed files are skipped by every analyzer, which is
+useful for vendored code or fixtures that intentionally contain attack-pattern
+literals. This repository excludes `zt_slop.py` and `tests/`, since the scanner's
+own pattern definitions would otherwise match themselves.
 
 Disable network access if you only want static diff checks:
 

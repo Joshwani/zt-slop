@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fnmatch
 import json
 import os
 import re
@@ -29,7 +30,78 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 VERSION = "0.1.0"
 
+# High-impact CLI tools whose unpinned installation in CI is a supply-chain risk.
+HIGH_IMPACT_TOOLS: List[str] = [
+    # Security/release scanners and signing tools.
+    "trivy",
+    "grype",
+    "syft",
+    "osv-scanner",
+    "cosign",
+    "snyk",
+    "semgrep",
+    "gitleaks",
+    "trufflehog",
+    "checkov",
+    "terrascan",
+    # Release / publish / cloud tooling.
+    "twine",
+    "build",
+    "wheel",
+    "setuptools",
+    "hatch",
+    "poetry",
+    "npm",
+    "pnpm",
+    "yarn",
+    "cargo",
+    "goreleaser",
+    "docker",
+    "kubectl",
+    "helm",
+    "gh",
+    "awscli",
+    "aws",
+    "gcloud",
+    "az",
+]
+
+# Narrower set used when matching floating container image names, to avoid
+# false positives from generic words like "build" or "npm".
+FLOATING_IMAGE_TOOLS: List[str] = [
+    "trivy",
+    "grype",
+    "syft",
+    "cosign",
+    "goreleaser",
+    "kubectl",
+    "helm",
+    "aws",
+    "gcloud",
+    "azure",
+    "snyk",
+    "semgrep",
+]
+
+# High-impact GitHub Actions that should be pinned to a full commit SHA.
+HIGH_IMPACT_ACTIONS: List[str] = [
+    "aquasecurity/trivy-action",
+    "aquasecurity/setup-trivy",
+    "docker/login-action",
+    "docker/build-push-action",
+    "pypa/gh-action-pypi-publish",
+    "softprops/action-gh-release",
+    "goreleaser/goreleaser-action",
+    "sigstore/cosign-installer",
+    "snyk/actions",
+    "github/codeql-action",
+    "google-github-actions/auth",
+    "aws-actions/configure-aws-credentials",
+    "azure/login",
+]
+
 DEFAULT_CONFIG: Dict[str, Any] = {
+    "exclude_paths": [],
     "allowed_registry_domains": [
         "registry.npmjs.org",
         "registry.yarnpkg.com",
@@ -43,6 +115,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "workflow": {
         "warn_on_unpinned_actions": True,
+    },
+    "ci_supply_chain": {
+        "enabled": True,
+        "block_third_party_package_repos": True,
+        "block_downloaded_package_keys": True,
+        "block_unpinned_high_impact_tools": True,
+        "block_floating_tool_images": True,
+        "block_high_impact_actions_not_sha_pinned": True,
+        "high_impact_tools": list(HIGH_IMPACT_TOOLS),
+        "high_impact_actions": list(HIGH_IMPACT_ACTIONS),
+        "additional_ci_paths": [],
+        "allowed_package_repo_domains": [],
+        "allowed_bootstrap_domains": [],
     },
 }
 
@@ -95,6 +180,101 @@ PUBLISH_RE = re.compile(
     r"\b(?:npm\s+publish|pnpm\s+publish|yarn\s+npm\s+publish|twine\s+upload|python\s+-m\s+twine\s+upload|"
     r"cargo\s+publish|gem\s+push|docker\s+push|goreleaser\b)",
     re.IGNORECASE,
+)
+
+# --- CI/CD supply-chain detection ---------------------------------------------
+
+# CI/release files we inspect. `.github/workflows/*` is a subset handled by
+# is_workflow(); these patterns broaden coverage without replacing it.
+CI_FILE_PATTERNS: List[re.Pattern[str]] = [
+    re.compile(r"(^|/)\.github/workflows/[^/]+\.ya?ml$"),
+    re.compile(r"(^|/)\.circleci/config\.ya?ml$"),
+    re.compile(r"(^|/)\.gitlab-ci\.ya?ml$"),
+    re.compile(r"(^|/)\.gitlab/ci/[^/]+\.ya?ml$"),
+    re.compile(r"(^|/)Jenkinsfile(\.[^/]+)?$"),
+    re.compile(r"(^|/)azure-pipelines\.ya?ml$"),
+    re.compile(r"(^|/)bitbucket-pipelines\.ya?ml$"),
+    re.compile(r"(^|/)buildkite\.ya?ml$"),
+    re.compile(r"(^|/)\.buildkite/[^/]+\.ya?ml$"),
+    re.compile(r"(^|/)Taskfile\.ya?ml$"),
+    re.compile(r"(^|/)Makefile$"),
+    re.compile(r"(^|/)ci/[^/]+\.sh$"),
+    re.compile(r"(^|/)ci_cd/[^/]+\.sh$"),
+    re.compile(r"(^|/)scripts/ci[^/]*\.sh$"),
+    re.compile(r"(^|/)scripts/release[^/]*\.sh$"),
+    re.compile(r"(^|/)scripts/publish[^/]*\.sh$"),
+]
+
+# A third-party OS package repository is being added.
+PACKAGE_REPO_RE = re.compile(
+    r"(add-apt-repository"
+    r"|/etc/apt/sources\.list"  # covers sources.list and sources.list.d/
+    r"|rpm\s+--import"
+    r"|yum-config-manager\s+--add-repo"
+    r"|dnf\s+config-manager\s+--add-repo"
+    r"|zypper\s+addrepo"
+    r"|apk\s+add\s+--repository"
+    r"|brew\s+tap)",
+    re.IGNORECASE,
+)
+
+# A signing key or installer bootstrap is being downloaded/piped.
+PACKAGE_KEY_OR_BOOTSTRAP_RE = re.compile(
+    r"(apt-key\s+add"
+    r"|gpg\s+--dearmor"
+    r"|(?:curl|wget)\b[^\n|]*\bgpg\b"
+    r"|(?:curl|wget)\b[^\n]*public\.key"
+    r"|(?:curl|wget)\b[^\n]*install\.sh"
+    r"|(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash)\b)",
+    re.IGNORECASE,
+)
+
+# Package-manager install verbs. The captured `rest` holds the arguments that
+# may name a high-impact tool.
+INSTALL_COMMAND_RE = re.compile(
+    r"\b("
+    r"apt-get\s+install|apt\s+install|aptitude\s+install|"
+    r"yum\s+install|dnf\s+install|zypper\s+install|apk\s+add|"
+    r"brew\s+install|"
+    r"pipx\s+install|python[0-9.]*\s+-m\s+pip\s+install|pip[0-9.]*\s+install|"
+    r"npm\s+install\s+-g|npm\s+install\s+--global|npm\s+i\s+-g|"
+    r"pnpm\s+add\s+-g|pnpm\s+add\s+--global|"
+    r"yarn\s+global\s+add|"
+    r"go\s+install|cargo\s+install"
+    r")\b(?P<rest>[^\n]*)",
+    re.IGNORECASE,
+)
+
+# `image:` step keys (GitLab/Buildkite/etc.) referencing a container image.
+IMAGE_KEY_RE = re.compile(r"\bimage\s*:\s*[\"']?([^\s\"']+)", re.IGNORECASE)
+DOCKER_RUN_RE = re.compile(r"\bdocker\s+run\b(?P<rest>[^\n]*)", re.IGNORECASE)
+IMAGE_LIKE_RE = re.compile(
+    r"^[A-Za-z0-9][\w./-]*(?::[\w.][\w.-]*)?(?:@sha256:[0-9a-fA-F]+)?$"
+)
+
+# `uses: owner/repo@ref` GitHub Action references.
+USES_ACTION_RE = re.compile(r"\buses\s*:\s*[\"']?([^@\s\"']+)@([^\s\"'#]+)")
+
+# A sha256 digest reference, e.g. an image pinned by digest.
+SHA256_RE = re.compile(r"\bsha256:[0-9a-fA-F]{64}\b", re.IGNORECASE)
+# A full 40-character git commit SHA.
+FULL_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+# An exact version/digest pin attached via ==, =, or @ (requires major.minor).
+EXACT_PIN_RE = re.compile(r"(?:==|=|@)v?\d+\.\d+(?:\.\d+)?(?:[-.+][0-9A-Za-z.-]+)?\b")
+
+# Indicators that a CI/release file is publish-capable or secret-bearing.
+PUBLISH_OR_SECRET_CONTEXT_RE = re.compile(
+    r"(twine\s+upload|npm\s+publish|pnpm\s+publish|yarn\s+npm\s+publish|cargo\s+publish"
+    r"|docker\s+push|goreleaser|gh\s+release|pypa/gh-action-pypi-publish"
+    r"|id-token\s*:\s*write|permissions\s*:\s*write-all|packages\s*:\s*write|contents\s*:\s*write"
+    r"|\bNPM_TOKEN\b|\bPYPI_TOKEN\b|\bTWINE_PASSWORD\b|\bGITHUB_TOKEN\b|\bAWS_ACCESS_KEY_ID\b"
+    r"|\bAWS_SECRET_ACCESS_KEY\b|\bGOOGLE_APPLICATION_CREDENTIALS\b|\bAZURE_CLIENT_SECRET\b|secrets\.)",
+    re.IGNORECASE,
+)
+
+PUBLISH_CONTEXT_NOTE = (
+    "This CI/release file appears publish-capable or secret-bearing, so mutable "
+    "tool installation can expose release credentials."
 )
 
 SECRET_PATTERNS: List[Tuple[str, re.Pattern[str], str]] = [
@@ -286,6 +466,155 @@ def allowed_domain(host: str, allowed_domains: Iterable[str]) -> bool:
         allowed = str(allowed).lower().rstrip(".")
         if host == allowed or host.endswith("." + allowed):
             return True
+    return False
+
+
+def is_excluded(path: str, config: Optional[Dict[str, Any]]) -> bool:
+    """True if `path` matches a configured `exclude_paths` glob/prefix.
+
+    Excluded files are skipped by every analyzer. This is how a project opts a
+    file out of scanning, e.g. the scanner's own pattern-definition source or
+    test fixtures that intentionally contain attack-pattern literals.
+    """
+    globs = (config or {}).get("exclude_paths", []) or []
+    name = Path(path).name
+    for pat in globs:
+        pat = str(pat)
+        if pat.endswith("/"):
+            if path == pat[:-1] or path.startswith(pat):
+                return True
+            continue
+        if fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(name, pat) or path == pat:
+            return True
+    return False
+
+
+def is_ci_or_release_file(path: str, config: Optional[Dict[str, Any]] = None) -> bool:
+    """True if `path` is a CI/CD or release automation file.
+
+    `.github/workflows/*` is intentionally a subset of this matcher, not a
+    replacement for is_workflow().
+    """
+    for pattern in CI_FILE_PATTERNS:
+        if pattern.search(path):
+            return True
+    if config:
+        additional = config.get("ci_supply_chain", {}).get("additional_ci_paths", []) or []
+        name = Path(path).name
+        for glob_pat in additional:
+            glob_pat = str(glob_pat)
+            if fnmatch.fnmatch(path, glob_pat) or fnmatch.fnmatch(name, glob_pat) or path == glob_pat:
+                return True
+    return False
+
+
+def line_has_exact_version_or_digest(line: str) -> bool:
+    """Conservatively detect an exact version or digest pin on a line.
+
+    Returns True for things like `trivy=0.69.3`, `twine==5.1.1`, `tool@1.2.3`,
+    and `@sha256:<64 hex>`. When in doubt we return False so the caller flags it.
+    """
+    if SHA256_RE.search(line):
+        return True
+    if EXACT_PIN_RE.search(line):
+        return True
+    return False
+
+
+def extract_urls(line: str) -> List[str]:
+    return URL_RE.findall(line)
+
+
+def hostname_allowed(url: str, allowed_domains: Iterable[str]) -> bool:
+    """Parse a URL and compare its hostname against an allowlist.
+
+    Comparison is by hostname (never substring) using urllib.parse.
+    """
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return allowed_domain(host, allowed_domains)
+
+
+def ci_file_has_publish_or_secret_context(changed: "ChangedFile") -> bool:
+    """True if the diff for this CI/release file shows publish/secret indicators."""
+    for line in changed.added:
+        if PUBLISH_OR_SECRET_CONTEXT_RE.search(line.text):
+            return True
+    for line in changed.removed:
+        if PUBLISH_OR_SECRET_CONTEXT_RE.search(line.text):
+            return True
+    return False
+
+
+def _install_tool_names(token: str) -> Set[str]:
+    """Extract candidate tool names from an install argument token.
+
+    Strips version/digest separators and splits path-like specs so that
+    `aquasec/trivy@1.2.3` and `github.com/aquasecurity/trivy/cmd/trivy@latest`
+    both yield `trivy`.
+    """
+    base = re.split(r"[=@:]", token, 1)[0].strip().lower()
+    names: Set[str] = set()
+    if base:
+        names.add(base)
+        for seg in base.split("/"):
+            seg = seg.strip()
+            if seg:
+                names.add(seg)
+    return names
+
+
+def _high_impact_install_on_line(line: str, high_impact_tools: Sequence[str]) -> Optional[str]:
+    """Return the high-impact tool name installed on this line, or None.
+
+    Only matches recognized package-manager install verbs so ordinary commands
+    like `npm ci`, `poetry install`, or `cargo build` are ignored.
+    """
+    tool_set = {str(t).lower() for t in high_impact_tools}
+    for m in INSTALL_COMMAND_RE.finditer(line):
+        rest = m.group("rest") or ""
+        for token in rest.split():
+            if token.startswith("-"):
+                continue
+            for name in _install_tool_names(token):
+                if name in tool_set:
+                    return name
+    return None
+
+
+def _image_refs_on_line(line: str) -> List[str]:
+    """Collect candidate container image references from a line."""
+    refs: List[str] = []
+    m_run = DOCKER_RUN_RE.search(line)
+    if m_run:
+        for token in (m_run.group("rest") or "").split():
+            if token.startswith("-") or "=" in token:
+                continue
+            if IMAGE_LIKE_RE.match(token):
+                refs.append(token)
+                break  # first positional arg to `docker run` is the image
+    m_img = IMAGE_KEY_RE.search(line)
+    if m_img:
+        refs.append(m_img.group(1))
+    return refs
+
+
+def _image_is_floating(image: str, floating_tools: Sequence[str]) -> bool:
+    """True if `image` references a high-impact tool and is not digest/tag pinned."""
+    if SHA256_RE.search(image):
+        return False
+    name_part = image.split("@", 1)[0]
+    repo, _, tag = name_part.partition(":")
+    repo_lower = repo.lower()
+    if not any(tool in repo_lower for tool in floating_tools):
+        return False
+    # No tag, or an explicitly floating `latest` tag, is unpinned.
+    if not tag or tag.lower() == "latest":
+        return True
     return False
 
 
@@ -815,6 +1144,171 @@ def analyze_secrets_and_exfil(files: Dict[str, ChangedFile], findings: List[Find
             )
 
 
+def _action_is_high_impact(action_name: str, high_impact_actions: Sequence[str]) -> bool:
+    name = action_name.lower()
+    for action in high_impact_actions:
+        action = str(action).lower()
+        if name == action or name.startswith(action + "/"):
+            return True
+    return False
+
+
+def scan_ci_supply_chain(changed_files: Dict[str, "ChangedFile"], config: Dict[str, Any]) -> List[Finding]:
+    """Inspect added lines in CI/release files for mutable supply-chain risk.
+
+    This never executes anything; it only matches added diff lines against
+    deterministic patterns for third-party repos, downloaded signing keys,
+    unpinned high-impact tool installs, floating images, and unpinned actions.
+    """
+    cfg = (config or {}).get("ci_supply_chain", {}) or {}
+    if not cfg.get("enabled", True):
+        return []
+
+    high_impact_tools = cfg.get("high_impact_tools", HIGH_IMPACT_TOOLS)
+    high_impact_actions = cfg.get("high_impact_actions", HIGH_IMPACT_ACTIONS)
+    allowed_repo_domains = cfg.get("allowed_package_repo_domains", []) or []
+
+    block_repo = bool(cfg.get("block_third_party_package_repos", True))
+    block_keys = bool(cfg.get("block_downloaded_package_keys", True))
+    block_tools = bool(cfg.get("block_unpinned_high_impact_tools", True))
+    block_images = bool(cfg.get("block_floating_tool_images", True))
+    block_actions = bool(cfg.get("block_high_impact_actions_not_sha_pinned", True))
+
+    findings: List[Finding] = []
+
+    for path, changed in changed_files.items():
+        if not is_ci_or_release_file(path, config):
+            continue
+        publish_context = ci_file_has_publish_or_secret_context(changed)
+
+        def finalize(base_block: bool, recommendation: str) -> Tuple[str, str]:
+            severity = "block" if base_block else "warn"
+            recommendation_out = recommendation
+            if publish_context:
+                if severity == "warn":
+                    severity = "block"
+                recommendation_out = f"{recommendation} {PUBLISH_CONTEXT_NOTE}"
+            return severity, recommendation_out
+
+        for line in changed.added:
+            text = line.text
+            evidence_line = redact(text.strip())[:200]
+
+            # Rule A: third-party package repository added.
+            if PACKAGE_REPO_RE.search(text):
+                urls = extract_urls(text)
+                allow_downgrade = (
+                    bool(allowed_repo_domains)
+                    and bool(urls)
+                    and all(hostname_allowed(u, allowed_repo_domains) for u in urls)
+                )
+                rec = (
+                    "Do not add mutable third-party package repositories in CI. Prefer "
+                    "pinned artifacts with verified SHA256/signature, pinned container "
+                    "digests, or a prebuilt trusted CI image."
+                )
+                severity, rec = finalize(block_repo and not allow_downgrade, rec)
+                findings.append(
+                    Finding(
+                        severity,
+                        "ci.third_party_package_repo",
+                        "CI adds third-party package repository",
+                        path,
+                        line.line,
+                        f"Added CI line adds a third-party package repository: `{evidence_line}`.",
+                        rec,
+                    )
+                )
+
+            # Rule B: downloaded package signing key or installer bootstrap.
+            if PACKAGE_KEY_OR_BOOTSTRAP_RE.search(text):
+                severity, rec = finalize(
+                    block_keys,
+                    "Do not download and trust package signing keys or pipe bootstrap "
+                    "installers into a shell at CI runtime. Fetch pinned artifacts and "
+                    "verify them by SHA256/signature, or use a prebuilt trusted CI image.",
+                )
+                findings.append(
+                    Finding(
+                        severity,
+                        "ci.downloaded_package_key_or_bootstrap",
+                        "CI downloads package signing key or bootstrap script",
+                        path,
+                        line.line,
+                        f"Added CI line downloads a signing key or bootstrap installer: `{evidence_line}`.",
+                        rec,
+                    )
+                )
+
+            # Rule C: unpinned high-impact tool installation.
+            tool = _high_impact_install_on_line(text, high_impact_tools)
+            if tool and not line_has_exact_version_or_digest(text):
+                severity, rec = finalize(
+                    block_tools,
+                    f"Pin `{tool}` to an exact version or digest (for example "
+                    f"`{tool}==X.Y.Z`, `{tool}=X.Y.Z`, or `image@sha256:...`) and verify "
+                    "its checksum or signature. Installing a high-impact tool from a "
+                    "mutable source lets an attacker swap the binary.",
+                )
+                findings.append(
+                    Finding(
+                        severity,
+                        "ci.unpinned_high_impact_tool_install",
+                        "CI installs high-impact tool without an exact version",
+                        path,
+                        line.line,
+                        f"Added CI line installs `{tool}` without an exact version or digest: `{evidence_line}`.",
+                        rec,
+                    )
+                )
+
+            # Rule D: floating container image for a high-impact tool.
+            for image in _image_refs_on_line(text):
+                if _image_is_floating(image, FLOATING_IMAGE_TOOLS):
+                    severity, rec = finalize(
+                        block_images,
+                        "Pin container images by digest, for example image@sha256:..., "
+                        "not by latest or an implicit mutable tag.",
+                    )
+                    findings.append(
+                        Finding(
+                            severity,
+                            "ci.floating_high_impact_tool_image",
+                            "CI uses floating container image for high-impact tool",
+                            path,
+                            line.line,
+                            f"Added CI line uses floating image `{image}` for a high-impact tool: `{evidence_line}`.",
+                            rec,
+                        )
+                    )
+
+            # Rule E: high-impact GitHub Action not pinned to a full commit SHA.
+            m_uses = USES_ACTION_RE.search(text)
+            if m_uses:
+                action_name = m_uses.group(1)
+                action_ref = m_uses.group(2)
+                if _action_is_high_impact(action_name, high_impact_actions) and not FULL_GIT_SHA_RE.match(action_ref):
+                    severity, rec = finalize(
+                        block_actions,
+                        "Pin high-impact GitHub Actions to a full 40-character commit SHA "
+                        "rather than a branch or version tag, since tags and branches are mutable.",
+                    )
+                    findings.append(
+                        Finding(
+                            severity,
+                            "ci.high_impact_action_not_sha_pinned",
+                            "High-impact GitHub Action is not pinned to a commit SHA",
+                            path,
+                            line.line,
+                            f"Added CI line uses high-impact action `{action_name}@{action_ref}`, "
+                            "which is not pinned to a full commit SHA.",
+                            rec,
+                        )
+                    )
+
+    return findings
+
+
 def query_osv(candidates: Sequence[Tuple[str, str, str, str]], config: Dict[str, Any], findings: List[Finding]) -> None:
     osv_config = config.get("osv", {})
     if not osv_config.get("enabled", True) or not candidates:
@@ -1084,11 +1578,14 @@ def scan(args: argparse.Namespace) -> Tuple[List[Finding], float]:
 
     diff_text = git_diff(args.base, args.head)
     files = parse_diff(diff_text)
+    files = {path: changed for path, changed in files.items() if not is_excluded(path, config)}
     findings: List[Finding] = []
 
     analyze_workflows(files, findings, config)
     analyze_lockfiles(files, findings, config)
     analyze_secrets_and_exfil(files, findings)
+    for ci_finding in scan_ci_supply_chain(files, config):
+        add_finding(findings, ci_finding)
 
     osv_candidates: List[Tuple[str, str, str, str]] = []
     osv_candidates.extend(analyze_package_json(files, args.base, args.head, findings))

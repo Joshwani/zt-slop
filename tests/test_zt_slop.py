@@ -30,6 +30,24 @@ def run(cmd, cwd):
     subprocess.run(cmd, cwd=cwd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
+def make_diff(path, added_lines):
+    """Build a minimal unified diff that adds `added_lines` to `path`."""
+    header = (
+        f"diff --git a/{path} b/{path}\n"
+        f"index 0000000..1111111 100644\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        f"@@ -0,0 +1,{len(added_lines)} @@\n"
+    )
+    body = "".join(f"+{line}\n" for line in added_lines)
+    return header + body
+
+
+def ci_findings(path, added_lines, config=None):
+    files = zt_slop.parse_diff(make_diff(path, added_lines))
+    return zt_slop.scan_ci_supply_chain(files, config or zt_slop.DEFAULT_CONFIG)
+
+
 class ZtSlopTests(unittest.TestCase):
     def test_redacts_known_tokens(self):
         text = "token='ghp_abcdefghijklmnopqrstuvwxyzABCDE12345'"
@@ -95,6 +113,208 @@ index 0000000..1111111 100644
         rule_ids = {f.rule_id for f in findings}
         self.assertIn("workflow.pull_request_target", rule_ids)
         self.assertIn("workflow.write_all_permissions", rule_ids)
+
+
+class CiFileDetectionTests(unittest.TestCase):
+    def test_matches_ci_and_release_paths(self):
+        positives = [
+            ".github/workflows/release.yml",
+            ".github/workflows/scan.yaml",
+            ".circleci/config.yml",
+            ".circleci/config.yaml",
+            ".gitlab-ci.yml",
+            ".gitlab/ci/build.yml",
+            "Jenkinsfile",
+            "azure-pipelines.yml",
+            "bitbucket-pipelines.yml",
+            "buildkite.yaml",
+            ".buildkite/pipeline.yml",
+            "Taskfile.yml",
+            "Makefile",
+            "ci/security_scans.sh",
+            "ci_cd/deploy.sh",
+            "scripts/ci-build.sh",
+            "scripts/release.sh",
+            "scripts/publish-package.sh",
+        ]
+        for path in positives:
+            self.assertTrue(zt_slop.is_ci_or_release_file(path), path)
+
+    def test_rejects_non_ci_paths(self):
+        negatives = ["src/app.py", "README.md", "docs/guide.md", "scripts/helper.sh", "config.yml"]
+        for path in negatives:
+            self.assertFalse(zt_slop.is_ci_or_release_file(path), path)
+
+    def test_workflow_is_subset_of_ci(self):
+        self.assertTrue(zt_slop.is_workflow(".github/workflows/x.yml"))
+        self.assertTrue(zt_slop.is_ci_or_release_file(".github/workflows/x.yml"))
+
+    def test_additional_ci_paths_from_config(self):
+        config = json.loads(json.dumps(zt_slop.DEFAULT_CONFIG))
+        config["ci_supply_chain"]["additional_ci_paths"] = ["deploy/*.sh"]
+        self.assertTrue(zt_slop.is_ci_or_release_file("deploy/run.sh", config))
+        self.assertFalse(zt_slop.is_ci_or_release_file("deploy/run.sh"))
+
+
+class ExcludePathsTests(unittest.TestCase):
+    def test_glob_and_prefix_matches(self):
+        config = {"exclude_paths": ["zt_slop.py", "tests/", "vendor/*.js"]}
+        self.assertTrue(zt_slop.is_excluded("zt_slop.py", config))
+        self.assertTrue(zt_slop.is_excluded("tests/test_zt_slop.py", config))
+        self.assertTrue(zt_slop.is_excluded("vendor/app.js", config))
+        self.assertFalse(zt_slop.is_excluded("src/app.py", config))
+        self.assertFalse(zt_slop.is_excluded("zt_slop_helper.py", config))
+
+    def test_empty_or_missing_excludes_nothing(self):
+        self.assertFalse(zt_slop.is_excluded("zt_slop.py", {}))
+        self.assertFalse(zt_slop.is_excluded("zt_slop.py", {"exclude_paths": []}))
+
+
+class CiSupplyChainPositiveTests(unittest.TestCase):
+    def test_litellm_circleci_regression(self):
+        findings = ci_findings(
+            ".circleci/config.yml",
+            [
+                "      - run: wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -",
+                '      - run: echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list',
+                "      - run: sudo apt-get install trivy",
+            ],
+        )
+        self.assertTrue(any(f.severity == "block" for f in findings))
+        rule_ids = {f.rule_id for f in findings}
+        self.assertIn("ci.downloaded_package_key_or_bootstrap", rule_ids)
+        self.assertIn("ci.third_party_package_repo", rule_ids)
+        self.assertIn("ci.unpinned_high_impact_tool_install", rule_ids)
+        for f in findings:
+            self.assertEqual(f.file, ".circleci/config.yml")
+        blob = " ".join(f.evidence for f in findings)
+        self.assertTrue("trivy" in blob or "aquasecurity.github.io" in blob)
+
+    def test_gitlab_pip_install_twine(self):
+        findings = ci_findings(
+            ".gitlab-ci.yml",
+            [
+                "    - pip install twine",
+                "    - twine upload dist/*",
+            ],
+        )
+        tool_findings = [f for f in findings if f.rule_id == "ci.unpinned_high_impact_tool_install"]
+        self.assertTrue(tool_findings)
+        f = tool_findings[0]
+        self.assertEqual(f.severity, "block")
+        self.assertIn("Pin", f.recommendation)
+        self.assertIn("version", f.recommendation.lower())
+
+    def test_docker_run_latest_image(self):
+        findings = ci_findings(
+            ".github/workflows/scan.yml",
+            ["      - run: docker run aquasec/trivy:latest fs ."],
+        )
+        block_floating = [
+            f for f in findings if f.rule_id == "ci.floating_high_impact_tool_image" and f.severity == "block"
+        ]
+        self.assertTrue(block_floating)
+
+    def test_high_impact_action_semver_tag(self):
+        findings = ci_findings(
+            ".github/workflows/release.yml",
+            ["      - uses: aquasecurity/trivy-action@v0"],
+        )
+        block_action = [
+            f for f in findings if f.rule_id == "ci.high_impact_action_not_sha_pinned" and f.severity == "block"
+        ]
+        self.assertTrue(block_action)
+
+    def test_curl_pipe_shell_in_ci_script(self):
+        findings = ci_findings(
+            "ci/security_scans.sh",
+            ["curl -sSfL https://example.com/install.sh | sh"],
+        )
+        block_bootstrap = [
+            f for f in findings if f.rule_id == "ci.downloaded_package_key_or_bootstrap" and f.severity == "block"
+        ]
+        self.assertTrue(block_bootstrap)
+
+
+class CiSupplyChainNegativeTests(unittest.TestCase):
+    def test_ordinary_apt_install_not_blocked(self):
+        findings = ci_findings(
+            ".circleci/config.yml",
+            ["      - run: sudo apt-get install -y git jq unzip"],
+        )
+        self.assertEqual(findings, [])
+
+    def test_pinned_pip_tool_not_blocked(self):
+        findings = ci_findings(
+            ".github/workflows/release.yml",
+            ["      - run: python -m pip install twine==5.1.1"],
+        )
+        self.assertFalse(any(f.rule_id == "ci.unpinned_high_impact_tool_install" for f in findings))
+
+    def test_digest_pinned_container_not_blocked(self):
+        digest = "a" * 64
+        findings = ci_findings(
+            ".github/workflows/scan.yml",
+            [f"      - run: docker run aquasec/trivy@sha256:{digest} fs ."],
+        )
+        self.assertFalse(any(f.rule_id == "ci.floating_high_impact_tool_image" for f in findings))
+
+    def test_full_sha_pinned_action_not_blocked(self):
+        findings = ci_findings(
+            ".github/workflows/scan.yml",
+            ["      - uses: aquasecurity/trivy-action@0123456789abcdef0123456789abcdef01234567"],
+        )
+        self.assertFalse(any(f.rule_id == "ci.high_impact_action_not_sha_pinned" for f in findings))
+
+    def test_ordinary_dependency_installs_not_blocked(self):
+        findings = ci_findings(
+            ".github/workflows/ci.yml",
+            [
+                "      - run: npm ci",
+                "      - run: pip install -r requirements.txt",
+                "      - run: poetry install",
+                "      - run: cargo build",
+                "      - run: go mod download",
+            ],
+        )
+        self.assertEqual(findings, [])
+
+
+class CiSupplyChainEscalationTests(unittest.TestCase):
+    def test_warn_escalates_to_block_with_publish_context(self):
+        config = json.loads(json.dumps(zt_slop.DEFAULT_CONFIG))
+        config["ci_supply_chain"]["block_unpinned_high_impact_tools"] = False
+        findings = ci_findings(
+            ".github/workflows/release.yml",
+            [
+                "      - run: pip install twine",
+                "      - run: twine upload dist/*",
+            ],
+            config=config,
+        )
+        tool_findings = [f for f in findings if f.rule_id == "ci.unpinned_high_impact_tool_install"]
+        self.assertTrue(tool_findings)
+        f = tool_findings[0]
+        self.assertEqual(f.severity, "block")
+        self.assertIn("publish-capable or secret-bearing", f.recommendation)
+
+    def test_allowed_repo_domain_downgrades_to_warn(self):
+        config = json.loads(json.dumps(zt_slop.DEFAULT_CONFIG))
+        config["ci_supply_chain"]["allowed_package_repo_domains"] = ["internal.example.com"]
+        findings = ci_findings(
+            "ci/setup.sh",
+            ['echo "deb https://internal.example.com/repo stable main" | sudo tee -a /etc/apt/sources.list.d/x.list'],
+            config=config,
+        )
+        repo_findings = [f for f in findings if f.rule_id == "ci.third_party_package_repo"]
+        self.assertTrue(repo_findings)
+        self.assertEqual(repo_findings[0].severity, "warn")
+
+    def test_disabled_section_returns_no_findings(self):
+        config = json.loads(json.dumps(zt_slop.DEFAULT_CONFIG))
+        config["ci_supply_chain"]["enabled"] = False
+        findings = ci_findings(".circleci/config.yml", ["      - run: sudo apt-get install trivy"], config=config)
+        self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":
