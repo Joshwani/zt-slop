@@ -23,6 +23,11 @@ Severity values:
 | `requirements.remote_dependency` | requirements file adds a remote/local source |
 | `secret.*` | known token/private-key pattern added to the diff |
 | `code.exfil_path` | changed file adds secret/env access and outbound network behavior |
+| `ci.third_party_package_repo` | CI/release file adds a mutable third-party package repository (apt/yum/dnf/zypper/apk/brew) |
+| `ci.downloaded_package_key_or_bootstrap` | CI/release file downloads a package signing key or pipes a bootstrap installer into a shell |
+| `ci.unpinned_high_impact_tool_install` | CI/release file installs a high-impact security/release tool without an exact version or digest |
+| `ci.floating_high_impact_tool_image` | CI/release file runs a high-impact tool container by `latest` or an implicit tag instead of a digest |
+| `ci.high_impact_action_not_sha_pinned` | CI/release file uses a high-impact GitHub Action not pinned to a full 40-character commit SHA |
 
 ## Warning rules
 
@@ -37,3 +42,31 @@ Severity values:
 | `package_json.floating_dependency` | package.json uses `latest`, `next`, `canary`, or `*` |
 | `osv.vulnerable_package` | Newly introduced dependency matched a non-malicious OSV vulnerability |
 | `code.dangerous_shell` | Added line contains shell/eval behavior commonly used in droppers |
+
+## CI/CD supply-chain rules
+
+The `ci.*` rules only inspect added lines in CI/release automation files. The
+matched paths include `.github/workflows/*`, `.circleci/config.y(a)ml`,
+`.gitlab-ci.y(a)ml`, `.gitlab/ci/*`, `Jenkinsfile`, `azure-pipelines.y(a)ml`,
+`bitbucket-pipelines.y(a)ml`, `buildkite.y(a)ml`, `.buildkite/*`,
+`Taskfile.y(a)ml`, `Makefile`, and release/publish shell scripts under
+`ci/`, `ci_cd/`, and `scripts/`. `.github/workflows/*` remains a subset, so the
+existing `workflow.*` rules still apply.
+
+These rules target the LiteLLM-style failure mode where a PR adds a CI job that
+installs a mutable third-party security/release tool at runtime from an external
+package source. The problem is not the tool itself; it is installing a
+high-impact tool from a mutable source without an exact pinned version and
+verification.
+
+Contextual escalation: if a CI/release file is publish-capable or
+secret-bearing (it contains things like `twine upload`, `docker push`,
+`gh release`, `id-token: write`, `permissions: write-all`, or token names such
+as `NPM_TOKEN`/`PYPI_TOKEN`/`AWS_ACCESS_KEY_ID`), a `warn`-level finding is
+escalated to `block` and annotated with an explanation that mutable tool
+installation can expose release credentials.
+
+Allowlisting: `allowed_package_repo_domains` may downgrade a third-party repo
+finding to `warn` when every URL on the line resolves (by parsed hostname, never
+substring) to an allowlisted domain. It still warns, because mutable repos
+remain risky.
