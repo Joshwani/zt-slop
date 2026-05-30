@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # High-impact CLI tools whose unpinned installation in CI is a supply-chain risk.
 HIGH_IMPACT_TOOLS: List[str] = [
