@@ -101,6 +101,7 @@ HIGH_IMPACT_ACTIONS: List[str] = [
 ]
 
 DEFAULT_CONFIG: Dict[str, Any] = {
+    "exclude_paths": [],
     "allowed_registry_domains": [
         "registry.npmjs.org",
         "registry.yarnpkg.com",
@@ -464,6 +465,26 @@ def allowed_domain(host: str, allowed_domains: Iterable[str]) -> bool:
     for allowed in allowed_domains:
         allowed = str(allowed).lower().rstrip(".")
         if host == allowed or host.endswith("." + allowed):
+            return True
+    return False
+
+
+def is_excluded(path: str, config: Optional[Dict[str, Any]]) -> bool:
+    """True if `path` matches a configured `exclude_paths` glob/prefix.
+
+    Excluded files are skipped by every analyzer. This is how a project opts a
+    file out of scanning, e.g. the scanner's own pattern-definition source or
+    test fixtures that intentionally contain attack-pattern literals.
+    """
+    globs = (config or {}).get("exclude_paths", []) or []
+    name = Path(path).name
+    for pat in globs:
+        pat = str(pat)
+        if pat.endswith("/"):
+            if path == pat[:-1] or path.startswith(pat):
+                return True
+            continue
+        if fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(name, pat) or path == pat:
             return True
     return False
 
@@ -1557,6 +1578,7 @@ def scan(args: argparse.Namespace) -> Tuple[List[Finding], float]:
 
     diff_text = git_diff(args.base, args.head)
     files = parse_diff(diff_text)
+    files = {path: changed for path, changed in files.items() if not is_excluded(path, config)}
     findings: List[Finding] = []
 
     analyze_workflows(files, findings, config)

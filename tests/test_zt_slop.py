@@ -156,6 +156,20 @@ class CiFileDetectionTests(unittest.TestCase):
         self.assertFalse(zt_slop.is_ci_or_release_file("deploy/run.sh"))
 
 
+class ExcludePathsTests(unittest.TestCase):
+    def test_glob_and_prefix_matches(self):
+        config = {"exclude_paths": ["zt_slop.py", "tests/", "vendor/*.js"]}
+        self.assertTrue(zt_slop.is_excluded("zt_slop.py", config))
+        self.assertTrue(zt_slop.is_excluded("tests/test_zt_slop.py", config))
+        self.assertTrue(zt_slop.is_excluded("vendor/app.js", config))
+        self.assertFalse(zt_slop.is_excluded("src/app.py", config))
+        self.assertFalse(zt_slop.is_excluded("zt_slop_helper.py", config))
+
+    def test_empty_or_missing_excludes_nothing(self):
+        self.assertFalse(zt_slop.is_excluded("zt_slop.py", {}))
+        self.assertFalse(zt_slop.is_excluded("zt_slop.py", {"exclude_paths": []}))
+
+
 class CiSupplyChainPositiveTests(unittest.TestCase):
     def test_litellm_circleci_regression(self):
         findings = ci_findings(
