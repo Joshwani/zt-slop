@@ -84,6 +84,7 @@ Optional `zt-slop.json`:
 
 ```json
 {
+  "exclude_paths": [],
   "allowed_registry_domains": [
     "registry.npmjs.org",
     "registry.yarnpkg.com",
@@ -121,6 +122,12 @@ or unpinned high-impact GitHub Actions. See [docs/rules.md](docs/rules.md) for
 the full list, the publish-context escalation, and domain allowlisting. The
 section is optional and backward compatible; omit it to use the built-in
 defaults.
+
+`exclude_paths` accepts globs (e.g. `vendor/*.js`) and directory prefixes ending
+in `/` (e.g. `tests/`). Listed files are skipped by every analyzer, which is
+useful for vendored code or fixtures that intentionally contain attack-pattern
+literals. This repository excludes `zt_slop.py` and `tests/`, since the scanner's
+own pattern definitions would otherwise match themselves.
 
 Disable network access if you only want static diff checks:
 
