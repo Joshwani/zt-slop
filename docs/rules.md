@@ -70,3 +70,19 @@ Allowlisting: `allowed_package_repo_domains` may downgrade a third-party repo
 finding to `warn` when every URL on the line resolves (by parsed hostname, never
 substring) to an allowlisted domain. It still warns, because mutable repos
 remain risky.
+
+## Suppressing findings
+
+Two mechanisms exist, in order of preference:
+
+1. **Inline suppression** (preferred, line-precise). A diff line containing
+   `zt-slop:ignore` is skipped by every analyzer, including the secret/network
+   co-occurrence rules. Wrap a block with `zt-slop:ignore-start` /
+   `zt-slop:ignore-end`. Use this for detection-pattern definitions and test
+   fixtures that intentionally contain attack strings, and document the reason.
+2. **`exclude_paths`** (coarse, file/dir level). Globs and `/`-suffixed directory
+   prefixes that skip whole files. Prefer inline suppression where possible.
+
+ZT-Slop dogfoods this: it scans its own `zt_slop.py`, tests, and demo with no
+path exclusions; only the specific pattern-definition and fixture lines carry
+`zt-slop:ignore` markers.
