@@ -8,6 +8,20 @@ While the project is in `0.x`, rule IDs and the config schema may still change.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-31
+
+### Added
+
+- Inline suppression: a diff line containing `zt-slop:ignore` (or a region wrapped
+  in `zt-slop:ignore-start` / `zt-slop:ignore-end`) is skipped by every analyzer,
+  including the secret/network co-occurrence rule.
+
+### Changed
+
+- ZT-Slop now scans its own source, tests, and demo with no path exclusions. The
+  repo's `exclude_paths` entries were removed in favor of line-precise inline
+  suppression on the specific pattern-definition and attack-fixture lines.
+
 ## [0.2.0] - 2026-05-30
 
 ### Added
@@ -53,6 +67,7 @@ While the project is in `0.x`, rule IDs and the config schema may still change.
   detection.
 - Markdown, JSON, and SARIF reports, plus GitHub annotations.
 
-[Unreleased]: https://github.com/Joshwani/zt-slop/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Joshwani/zt-slop/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Joshwani/zt-slop/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Joshwani/zt-slop/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Joshwani/zt-slop/releases/tag/v0.1.0
