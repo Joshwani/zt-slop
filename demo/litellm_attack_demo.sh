@@ -68,6 +68,8 @@ echo "unpinned install of Trivy in .circleci/config.yml:"
 echo
 
 # --- Attack PR: the exact LiteLLM-style Trivy bootstrap. ----------------------
+# zt-slop:ignore-start  -- this heredoc deliberately recreates the attack so the
+# demo has something to catch; it is a fixture, not a real CI command.
 cat >> .circleci/config.yml <<'YAML'
       - run:
           name: Install and run Trivy
@@ -80,6 +82,7 @@ cat >> .circleci/config.yml <<'YAML'
             sudo apt-get install trivy
             trivy fs --no-progress /
 YAML
+# zt-slop:ignore-end
 git add -A
 git commit -qm "ci: add trivy scan"
 

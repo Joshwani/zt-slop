@@ -138,10 +138,31 @@ section is optional and backward compatible; omit it to use the built-in
 defaults.
 
 `exclude_paths` accepts globs (e.g. `vendor/*.js`) and directory prefixes ending
-in `/` (e.g. `tests/`). Listed files are skipped by every analyzer, which is
-useful for vendored code or fixtures that intentionally contain attack-pattern
-literals. This repository excludes `zt_slop.py` and `tests/`, since the scanner's
-own pattern definitions would otherwise match themselves.
+in `/` (e.g. `third_party/`). Listed files are skipped by every analyzer. Prefer
+the narrower inline suppression below over excluding whole files.
+
+### Inline suppression
+
+When a specific line is a known false positive (for example a detection pattern
+or a test fixture that intentionally contains an attack string), annotate it
+instead of excluding the whole file:
+
+```bash
+curl -sSfL https://example.com/install.sh | sh  # zt-slop:ignore -- documented reason
+```
+
+A line containing `zt-slop:ignore` is skipped by every analyzer, including the
+secret/network co-occurrence rules. To suppress a block, wrap it:
+
+```bash
+# zt-slop:ignore-start
+... lines that are detection patterns or fixtures ...
+# zt-slop:ignore-end
+```
+
+ZT-Slop dogfoods this: it scans its own source and tests (nothing is excluded),
+and the handful of lines that are literally attack-pattern definitions or
+fixtures carry `zt-slop:ignore` markers with a justification.
 
 Disable network access if you only want static diff checks:
 

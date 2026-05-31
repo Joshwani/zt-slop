@@ -1,8 +1,5 @@
 {
-  "exclude_paths": [
-    "zt_slop.py",
-    "tests/"
-  ],
+  "exclude_paths": [],
   "allowed_registry_domains": [
     "registry.npmjs.org",
     "registry.yarnpkg.com",

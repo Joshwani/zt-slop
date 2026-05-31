@@ -182,7 +182,19 @@ PUBLISH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Inline suppression markers. A diff line containing the `ignore` marker is
+# skipped by every analyzer; the `-start`/`-end` markers skip a whole region.
+# Patterns use `\s*` between the colon and the keyword so this module's own
+# marker definitions never match themselves.
+SUPPRESS_REGION_START_RE = re.compile(r"zt-slop:\s*ignore-start\b", re.IGNORECASE)
+SUPPRESS_REGION_END_RE = re.compile(r"zt-slop:\s*ignore-end\b", re.IGNORECASE)
+SUPPRESS_LINE_RE = re.compile(r"zt-slop:\s*ignore\b(?!-)", re.IGNORECASE)
+
 # --- CI/CD supply-chain detection ---------------------------------------------
+# zt-slop:ignore-start  -- the constants below are literal detection patterns
+# (they contain the very command strings they look for), not real network or
+# secret usage, so they are excluded from scanning this file. The rules they
+# define still apply to every other file.
 
 # CI/release files we inspect. `.github/workflows/*` is a subset handled by
 # is_workflow(); these patterns broaden coverage without replacing it.
@@ -276,6 +288,7 @@ PUBLISH_CONTEXT_NOTE = (
     "This CI/release file appears publish-capable or secret-bearing, so mutable "
     "tool installation can expose release credentials."
 )
+# zt-slop:ignore-end
 
 SECRET_PATTERNS: List[Tuple[str, re.Pattern[str], str]] = [
     ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "block"),
@@ -427,6 +440,40 @@ def parse_diff(diff_text: str) -> Dict[str, ChangedFile]:
                 new_line += 1
 
     return files
+
+
+def suppressed_added_lines(added: Sequence[ChangedLine]) -> Set[int]:
+    """Return the set of added line numbers covered by inline suppression markers.
+
+    Supports a single-line marker (`zt-slop:ignore`) and region markers
+    (`zt-slop:ignore-start` ... `zt-slop:ignore-end`). The marker lines
+    themselves are also suppressed.
+    """
+    suppressed: Set[int] = set()
+    in_region = False
+    for line in added:
+        if line.line is None:
+            continue
+        text = line.text
+        if SUPPRESS_REGION_START_RE.search(text):
+            in_region = True
+            suppressed.add(line.line)
+            continue
+        if SUPPRESS_REGION_END_RE.search(text):
+            in_region = False
+            suppressed.add(line.line)
+            continue
+        if in_region or SUPPRESS_LINE_RE.search(text):
+            suppressed.add(line.line)
+    return suppressed
+
+
+def apply_suppressions(files: Dict[str, ChangedFile]) -> None:
+    """Drop suppressed added lines so no analyzer (including co-occurrence rules) sees them."""
+    for changed in files.values():
+        suppressed = suppressed_added_lines(changed.added)
+        if suppressed:
+            changed.added = [line for line in changed.added if line.line not in suppressed]
 
 
 def git_show_text(rev: str, path: str) -> Optional[str]:
@@ -1579,6 +1626,7 @@ def scan(args: argparse.Namespace) -> Tuple[List[Finding], float]:
     diff_text = git_diff(args.base, args.head)
     files = parse_diff(diff_text)
     files = {path: changed for path, changed in files.items() if not is_excluded(path, config)}
+    apply_suppressions(files)
     findings: List[Finding] = []
 
     analyze_workflows(files, findings, config)
