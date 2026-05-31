@@ -42,6 +42,20 @@ For local testing:
 python3 zt_slop.py --base origin/main --head HEAD --no-network
 ```
 
+## Demo: blocking the LiteLLM-style attack
+
+To see ZT-Slop catch a real-world CI supply-chain pattern, run:
+
+```bash
+bash demo/litellm_attack_demo.sh
+```
+
+It builds a throwaway git repo, simulates a PR that adds a mutable third-party
+apt repo, a downloaded signing key, and an unpinned Trivy install to
+`.circleci/config.yml` (the LiteLLM pattern), and shows ZT-Slop **block** it with
+three findings. It then simulates a safe remediation PR (Trivy pinned by
+container digest) and shows ZT-Slop **pass** it. No PR code is executed.
+
 ## What it blocks in v0
 
 ZT-Slop starts small and high-signal. The default `block` rules are:
